@@ -1,9 +1,11 @@
 #!/bin/bash
 
 echo "========================================================"
-echo "     ILLUMINA BWA & SAMTOOLS ALIGNMENT PIPELINE         "
+echo "   UNIVERSAL ILLUMINA BWA & SAMTOOLS ALIGNMENT PIPELINE "
 echo "========================================================"
-echo "Tip: You can press the [Tab] key to auto-complete paths!"
+echo "📍 Current directory: $(pwd)"
+echo "👉 Tip: Press [Enter] at any folder prompt if the files are"
+echo "   already in your current directory, or use [Tab] to auto-complete!"
 echo "--------------------------------------------------------"
 
 # 1. Check if BWA and SAMtools are installed
@@ -22,24 +24,38 @@ fi
 # ========================================================
 # 2. REFERENCE GENOME & AUTOMATIC INDEX CHECK
 # ========================================================
-read -e -p "1. Enter the directory of your reference genome (e.g., ~/data/ecoli_ref_genome): " REF_DIR
+read -e -p "1. Reference genome folder (press [Enter] for current folder): " REF_DIR
+REF_DIR="${REF_DIR:-.}"
 REF_DIR="${REF_DIR/#\~/$HOME}"
 REF_DIR="${REF_DIR%/}"
 
-if [[ -z "$REF_DIR" || ! -d "$REF_DIR" ]]; then
+# If user typed the name of the folder they are ALREADY standing in, stay here
+if [[ ! -d "$REF_DIR" && "$(basename "$PWD")" == "$REF_DIR" ]]; then
+    REF_DIR="."
+fi
+
+if [[ ! -d "$REF_DIR" ]]; then
     echo "❌ ALIGNMENT FAILED: Reference directory '$REF_DIR' does not exist!"
     echo "   Current working directory: $(pwd)"
     exit 1
 fi
 
-echo "   Files found in $REF_DIR:"
-ls "$REF_DIR" | grep -E '\.(fasta|fa|fna)$' | sed 's/^/     - /'
+# Auto-detect the first FASTA file in the directory to use as a smart default
+DEFAULT_REF=$(ls "$REF_DIR" 2>/dev/null | grep -E '\.(fasta|fa|fna)$' | head -n 1)
 
-read -e -p "2. Enter the reference genome filename (default: ecoli_ref.fasta): " REF_NAME
-REF_NAME="${REF_NAME:-ecoli_ref.fasta}"
+echo "   FASTA files found in $REF_DIR:"
+if [[ -n "$DEFAULT_REF" ]]; then
+    ls "$REF_DIR" | grep -E '\.(fasta|fa|fna)$' | sed 's/^/     - /'
+else
+    echo "     (No .fasta, .fa, or .fna files found in $REF_DIR)"
+fi
+
+read -e -p "2. Enter reference genome filename (press [Enter] for '${DEFAULT_REF:-none}'): " REF_NAME
+REF_NAME="${REF_NAME:-$DEFAULT_REF}"
+REF_NAME=$(basename "$REF_NAME")
 REF_FILE="${REF_DIR}/${REF_NAME}"
 
-if [[ ! -f "$REF_FILE" ]]; then
+if [[ -z "$REF_NAME" || ! -f "$REF_FILE" ]]; then
     echo "❌ ALIGNMENT FAILED: Reference genome file '$REF_FILE' is missing!"
     exit 1
 elif [[ ! -s "$REF_FILE" ]]; then
@@ -66,8 +82,8 @@ echo "--------------------------------------------------------"
 # ========================================================
 echo "Which type of FASTQ reads do you want to align?"
 echo "  [1] Trimmed reads (e.g., SAMPLE_1_paired.fastq.gz & SAMPLE_2_paired.fastq.gz)"
-echo "  [2] Untrimmed raw reads (if FastQC quality is already good: SAMPLE_1.fastq.gz & SAMPLE_2.fastq.gz)"
-read -p "Select 1 or 2 (default: 1): " READ_TYPE
+echo "  [2] Untrimmed raw reads (e.g., SAMPLE_1.fastq.gz & SAMPLE_2.fastq.gz)"
+read -p "Select 1 or 2 (press [Enter] for 1): " READ_TYPE
 READ_TYPE="${READ_TYPE:-1}"
 
 if [[ "$READ_TYPE" != "1" && "$READ_TYPE" != "2" ]]; then
@@ -75,46 +91,77 @@ if [[ "$READ_TYPE" != "1" && "$READ_TYPE" != "2" ]]; then
     exit 1
 fi
 
-read -e -p "3. Enter the directory containing your FASTQ files (e.g., trimmed_data or .): " READ_DIR
+read -e -p "3. Folder containing FASTQ files (press [Enter] for current folder, or type e.g., trimmed_data): " READ_DIR
+READ_DIR="${READ_DIR:-.}"
 READ_DIR="${READ_DIR/#\~/$HOME}"
 READ_DIR="${READ_DIR%/}"
 
-if [[ -z "$READ_DIR" || ! -d "$READ_DIR" ]]; then
+if [[ ! -d "$READ_DIR" && "$(basename "$PWD")" == "$READ_DIR" ]]; then
+    READ_DIR="."
+fi
+
+if [[ ! -d "$READ_DIR" ]]; then
     echo "❌ ALIGNMENT FAILED: Read directory '$READ_DIR' does not exist!"
+    echo "   Current working directory: $(pwd)"
     exit 1
 fi
 
-read -p "4. Enter the Sample ID (e.g., SRR957824): " RAW_SAMPLE
-SAMPLE=$(echo "$RAW_SAMPLE" | sed -E 's/_[12](_paired|_unpaired)?\.fastq\.gz$//; s/\.fastq\.gz$//')
+read -e -p "4. Enter the Sample ID or Accession (e.g., SRR957824): " RAW_SAMPLE
+SAMPLE=$(basename "$RAW_SAMPLE" | sed -E 's/(_R?[12](_001)?(_paired|_unpaired)?)\.(fastq|fq)(\.gz)?$//; s/\.(fastq|fq)(\.gz)?$//')
 
 if [[ -z "$SAMPLE" ]]; then
     echo "❌ ALIGNMENT FAILED: You did not enter a Sample ID."
     exit 1
 fi
 
-if [[ "$READ_TYPE" == "1" ]]; then
-    FWD_READ="${READ_DIR}/${SAMPLE}_1_paired.fastq.gz"
-    REV_READ="${READ_DIR}/${SAMPLE}_2_paired.fastq.gz"
-else
-    FWD_READ="${READ_DIR}/${SAMPLE}_1.fastq.gz"
-    REV_READ="${READ_DIR}/${SAMPLE}_2.fastq.gz"
+# Auto-detect Forward and Reverse read files
+FWD_READ=""
+REV_READ=""
+
+for EXT in "fastq.gz" "fq.gz" "fastq" "fq"; do
+    if [[ "$READ_TYPE" == "1" ]]; then
+        if [[ -f "${READ_DIR}/${SAMPLE}_1_paired.${EXT}" && -f "${READ_DIR}/${SAMPLE}_2_paired.${EXT}" ]]; then
+            FWD_READ="${READ_DIR}/${SAMPLE}_1_paired.${EXT}"
+            REV_READ="${READ_DIR}/${SAMPLE}_2_paired.${EXT}"
+            break
+        elif [[ -f "${READ_DIR}/${SAMPLE}_R1_paired.${EXT}" && -f "${READ_DIR}/${SAMPLE}_R2_paired.${EXT}" ]]; then
+            FWD_READ="${READ_DIR}/${SAMPLE}_R1_paired.${EXT}"
+            REV_READ="${READ_DIR}/${SAMPLE}_R2_paired.${EXT}"
+            break
+        fi
+    else
+        if [[ -f "${READ_DIR}/${SAMPLE}_1.${EXT}" && -f "${READ_DIR}/${SAMPLE}_2.${EXT}" ]]; then
+            FWD_READ="${READ_DIR}/${SAMPLE}_1.${EXT}"
+            REV_READ="${READ_DIR}/${SAMPLE}_2.${EXT}"
+            break
+        elif [[ -f "${READ_DIR}/${SAMPLE}_R1.${EXT}" && -f "${READ_DIR}/${SAMPLE}_R2.${EXT}" ]]; then
+            FWD_READ="${READ_DIR}/${SAMPLE}_R1.${EXT}"
+            REV_READ="${READ_DIR}/${SAMPLE}_R2.${EXT}"
+            break
+        elif [[ -f "${READ_DIR}/${SAMPLE}_R1_001.${EXT}" && -f "${READ_DIR}/${SAMPLE}_R2_001.${EXT}" ]]; then
+            FWD_READ="${READ_DIR}/${SAMPLE}_R1_001.${EXT}"
+            REV_READ="${READ_DIR}/${SAMPLE}_R2_001.${EXT}"
+            break
+        fi
+    fi
+done
+
+if [[ -z "$FWD_READ" || -z "$REV_READ" ]]; then
+    echo "❌ ALIGNMENT FAILED: Could not find matching paired FASTQ files for '$SAMPLE' in '$READ_DIR'."
+    if [[ "$READ_TYPE" == "1" ]]; then
+        echo "   Expected: ${READ_DIR}/${SAMPLE}_1_paired.fastq.gz and ${READ_DIR}/${SAMPLE}_2_paired.fastq.gz"
+    else
+        echo "   Expected: ${READ_DIR}/${SAMPLE}_1.fastq.gz and ${READ_DIR}/${SAMPLE}_2.fastq.gz"
+    fi
+    exit 1
 fi
 
-# Verify Forward and Reverse reads exist and are not empty
-if [[ ! -f "$FWD_READ" ]]; then
-    echo "❌ ALIGNMENT FAILED: Forward read '$FWD_READ' is missing!"
-    echo "   Fix: Check that '$READ_DIR' is the right folder and '$SAMPLE' is spelled correctly."
-    exit 1
-elif [[ ! -s "$FWD_READ" ]]; then
+if [[ ! -s "$FWD_READ" ]]; then
     echo "❌ ALIGNMENT FAILED: Forward read '$FWD_READ' is empty (0 bytes)!"
     exit 1
 fi
 
-if [[ ! -f "$REV_READ" ]]; then
-    echo "❌ ALIGNMENT FAILED: Reverse read '$REV_READ' is missing!"
-    echo "   Fix: Found forward read, but its matching reverse read is not in '$READ_DIR'."
-    exit 1
-elif [[ ! -s "$REV_READ" ]]; then
+if [[ ! -s "$REV_READ" ]]; then
     echo "❌ ALIGNMENT FAILED: Reverse read '$REV_READ' is empty (0 bytes)!"
     exit 1
 fi
@@ -123,26 +170,22 @@ fi
 # 4. OUTPUT DIRECTORIES & FILENAMES FOR SAM AND BAM
 # ========================================================
 echo "--------------------------------------------------------"
-read -e -p "5. Enter the directory to save your .sam file (e.g., aligned_data): " SAM_DIR
+read -e -p "5. Folder to save output .sam file (press [Enter] for 'aligned_data'): " SAM_DIR
+SAM_DIR="${SAM_DIR:-aligned_data}"
 SAM_DIR="${SAM_DIR/#\~/$HOME}"
 SAM_DIR="${SAM_DIR%/}"
-
-if [[ -z "$SAM_DIR" ]]; then
-    echo "❌ ALIGNMENT FAILED: You did not enter an output directory for the .sam file."
-    exit 1
-fi
 
 if ! mkdir -p "$SAM_DIR" 2>/dev/null; then
     echo "❌ ALIGNMENT FAILED: Could not create directory '$SAM_DIR' (Permission denied)."
     exit 1
 fi
 
-read -p "6. Enter the name for your .sam file (default: ${SAMPLE}.sam): " SAM_NAME
+read -p "6. Name for your .sam file (press [Enter] for '${SAMPLE}.sam'): " SAM_NAME
 SAM_NAME="${SAM_NAME:-${SAMPLE}.sam}"
 [[ "$SAM_NAME" != *.sam ]] && SAM_NAME="${SAM_NAME}.sam"
 SAM_PATH="${SAM_DIR}/${SAM_NAME}"
 
-read -e -p "7. Enter the directory to save your sorted .bam files (Press Enter to use '$SAM_DIR'): " BAM_DIR
+read -e -p "7. Folder to save sorted .bam files (press [Enter] to also use '$SAM_DIR'): " BAM_DIR
 BAM_DIR="${BAM_DIR:-$SAM_DIR}"
 BAM_DIR="${BAM_DIR/#\~/$HOME}"
 BAM_DIR="${BAM_DIR%/}"
@@ -153,7 +196,7 @@ if ! mkdir -p "$BAM_DIR" 2>/dev/null; then
 fi
 
 DEFAULT_BAM="${SAM_NAME%.sam}_sorted.bam"
-read -p "8. Enter the name for your sorted .bam file (default: $DEFAULT_BAM): " BAM_NAME
+read -p "8. Name for your sorted .bam file (press [Enter] for '$DEFAULT_BAM'): " BAM_NAME
 BAM_NAME="${BAM_NAME:-$DEFAULT_BAM}"
 [[ "$BAM_NAME" != *.bam ]] && BAM_NAME="${BAM_NAME}.bam"
 BAM_PATH="${BAM_DIR}/${BAM_NAME}"
@@ -222,13 +265,26 @@ echo "✔ Step 4/4 Complete: Alignment stats saved to $STATS_FILE"
 # 7. OPTIONAL CLEANUP OF RAW .SAM FILE
 # ========================================================
 echo ""
-read -p "Do you want to delete the large uncompressed '$SAM_PATH' file to save disk space? (y/n, default: n): " DEL_SAM
-if [[ "$DEL_SAM" =~ ^[Yy]$ ]]; then
+echo "🧹 OPTIONAL FILE CLEANUP:"
+echo "   • $SAM_PATH (large uncompressed raw alignment file)"
+read -p "9. Do you want to REMOVE '$SAM_PATH' and keep only the compressed sorted BAM files? [y/N]: " DEL_SAM
+if [[ "$DEL_SAM" =~ ^[Yy]([Ee][Ss])?$ ]]; then
     rm -f "$SAM_PATH"
-    echo "🗑️  Deleted '$SAM_PATH'."
+    echo "🗑️  Removed '$SAM_PATH'."
+else
+    echo "📁 Kept '$SAM_PATH'."
 fi
 
 echo ""
 echo "✅ ALL STEPS COMPLETED SUCCESSFULLY!"
-echo "Your final aligned files:"
+echo "Your saved alignment files:"
 ls -lh "$BAM_PATH" "${BAM_PATH}.bai" "$STATS_FILE"
+echo ""
+echo "========================================================"
+echo "💡 WANT TO RUN THIS ALIGNMENT MANUALLY NEXT TIME FOR ${SAMPLE}?"
+echo "You can run this entire alignment directly in the terminal"
+echo "using this short one-line piped command for ${SAMPLE}:"
+echo ""
+echo "   bwa index ${REF_FILE}   # (Only needed once)"
+echo "   bwa mem -t 4 ${REF_FILE} ${FWD_READ} ${REV_READ} | samtools sort -@ 4 -o ${BAM_PATH} && samtools index ${BAM_PATH} && samtools flagstat ${BAM_PATH}"
+echo "========================================================"
